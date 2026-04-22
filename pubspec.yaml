@@ -1,0 +1,60 @@
+name: hills_meet_sea
+description: Private chat app for two.
+publish_to: 'none'
+version: 1.0.0+1
+
+environment:
+  sdk: '>=3.0.0 <4.0.0'
+
+dependencies:
+  flutter:
+    sdk: flutter
+  flutter_web_plugins:
+    sdk: flutter
+
+  # Supabase - backend, auth, realtime, storage
+  supabase_flutter: ^2.5.0
+
+  # WebRTC - voice/video calls
+  flutter_webrtc: ^1.4.1
+
+  # Image picking
+  image_picker: ^1.1.2
+  image_picker_for_web: ^3.0.4
+
+  # Cached images
+  cached_network_image: ^3.3.1
+
+  # Time formatting
+  timeago: ^3.6.1
+
+  # UUID generation
+  uuid: ^4.4.0
+
+  # Local notifications (web push)
+  web: ^1.1.1
+
+  # Audio playback for voice notes
+  audioplayers: ^6.0.0
+
+  # Replies
+  flutter_slidable: ^3.1.0
+
+  # State management
+  provider: ^6.1.1
+
+  intl: ^0.19.0
+  flutter_animate: ^4.5.0
+  google_fonts: ^6.2.1
+  http: ^1.2.1
+  record: ^6.2.0
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^4.0.0
+
+flutter:
+  uses-material-design: true
+  assets:
+    - assets/
