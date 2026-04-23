@@ -1,9 +1,9 @@
 import 'package:flutter/material.dart';
 import 'package:google_fonts/google_fonts.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
-import '../main.dart';
+
+import '../core/supabase_client.dart';
 import '../widgets/glass_container.dart';
-import 'chat_screen.dart';
 
 class AuthScreen extends StatefulWidget {
   const AuthScreen({super.key});
@@ -54,7 +54,7 @@ class _AuthScreenState extends State<AuthScreen>
           data: {'name': _nameCtrl.text.trim()},
         );
       }
-      // Navigation handled by main.dart onAuthStateChange
+      // Navigation handled by main.dart onAuthStateChange.
     } on AuthException catch (e) {
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
@@ -85,11 +85,7 @@ class _AuthScreenState extends State<AuthScreen>
                   Color(0xFF1A0040),
                   Color(0xFF0D1A40),
                 ],
-                stops: [
-                  0,
-                  _bgAnim.value * 0.5 + 0.25,
-                  1,
-                ],
+                stops: [0, _bgAnim.value * 0.5 + 0.25, 1],
               ),
             ),
             child: child,
@@ -97,11 +93,15 @@ class _AuthScreenState extends State<AuthScreen>
         },
         child: Stack(
           children: [
-            // Floating orbs for glassmorphic depth
-            _Orb(top: -80, left: -80, color: const Color(0x40B57BFF), size: 320),
-            _Orb(bottom: -60, right: -60, color: const Color(0x3063B3FF), size: 280),
-            _Orb(top: 200, right: 40, color: const Color(0x20FF7BBF), size: 180),
-
+            _Orb(
+                top: -80, left: -80, color: const Color(0x40B57BFF), size: 320),
+            _Orb(
+                bottom: -60,
+                right: -60,
+                color: const Color(0x3063B3FF),
+                size: 280),
+            _Orb(
+                top: 200, right: 40, color: const Color(0x20FF7BBF), size: 180),
             Center(
               child: SingleChildScrollView(
                 padding: const EdgeInsets.all(24),
@@ -129,7 +129,6 @@ class _AuthScreenState extends State<AuthScreen>
                         ),
                       ),
                       const SizedBox(height: 48),
-
                       GlassContainer(
                         borderRadius: BorderRadius.circular(32),
                         padding: const EdgeInsets.all(32),
@@ -220,14 +219,26 @@ class _AuthScreenState extends State<AuthScreen>
 class _Orb extends StatelessWidget {
   final double? top, bottom, left, right, size;
   final Color color;
-  const _Orb({this.top, this.bottom, this.left, this.right, required this.color, required this.size});
+
+  const _Orb({
+    this.top,
+    this.bottom,
+    this.left,
+    this.right,
+    required this.color,
+    required this.size,
+  });
 
   @override
   Widget build(BuildContext context) {
     return Positioned(
-      top: top, bottom: bottom, left: left, right: right,
+      top: top,
+      bottom: bottom,
+      left: left,
+      right: right,
       child: Container(
-        width: size, height: size,
+        width: size,
+        height: size,
         decoration: BoxDecoration(shape: BoxShape.circle, color: color),
       ),
     );
@@ -254,8 +265,8 @@ class _GlassInput extends StatelessWidget {
     return Container(
       decoration: BoxDecoration(
         borderRadius: BorderRadius.circular(14),
-        color: Colors.white.withOpacity(0.08),
-        border: Border.all(color: Colors.white.withOpacity(0.15)),
+        color: Colors.white.withValues(alpha: 0.08),
+        border: Border.all(color: Colors.white.withValues(alpha: 0.15)),
       ),
       child: TextField(
         controller: controller,
@@ -264,13 +275,11 @@ class _GlassInput extends StatelessWidget {
         style: GoogleFonts.dmSans(color: Colors.white, fontSize: 15),
         decoration: InputDecoration(
           hintText: hint,
-          hintStyle: GoogleFonts.dmSans(
-            color: Colors.white38,
-            fontSize: 15,
-          ),
+          hintStyle: GoogleFonts.dmSans(color: Colors.white38, fontSize: 15),
           prefixIcon: Icon(icon, color: Colors.white38, size: 20),
           border: InputBorder.none,
-          contentPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 16),
+          contentPadding:
+              const EdgeInsets.symmetric(horizontal: 16, vertical: 16),
         ),
       ),
     );

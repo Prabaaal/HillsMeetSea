@@ -3,16 +3,16 @@ import 'package:image_picker/image_picker.dart';
 import 'package:timeago/timeago.dart' as timeago;
 import 'package:flutter_slidable/flutter_slidable.dart';
 import 'package:record/record.dart';
-import 'package:http/http.dart' as http;
-import '../main.dart';
+
+import '../core/supabase_client.dart';
 import '../models/message.dart';
+import '../models/profile.dart';
 import '../services/call_service.dart';
 import '../services/chat_service.dart';
 import '../services/notification_service.dart';
-import '../widgets/message_bubble.dart';
-import '../widgets/sticker_picker.dart';
+import '../utils/downloader.dart';
+import '../widgets/widgets.dart';
 import 'call_screen.dart';
-import 'auth_screen.dart';
 
 class ChatScreen extends StatefulWidget {
   const ChatScreen({super.key});
@@ -40,22 +40,50 @@ class _ChatScreenState extends State<ChatScreen> {
   Map<String, dynamic>? _partnerPresence;
   PushPermissionStatus? _pushStatus;
   Message? _replyingTo;
+  bool _loadingMore = false;
+  bool _hasMore = true;
+
+  // O(1) reply lookup — rebuilt whenever _messages changes.
+  Map<String, Message> _messageIndex = {};
 
   String get _myId => supabase.auth.currentUser!.id;
 
   @override
   void initState() {
     super.initState();
-    _textCtrl.addListener(() => setState(() {})); // rebuild for voice/send toggle
+    _scrollCtrl.addListener(_onScroll);
     _init();
+  }
+
+  void _onScroll() {
+    if (_scrollCtrl.position.pixels <=
+            _scrollCtrl.position.minScrollExtent + 50 &&
+        !_loadingMore &&
+        _hasMore) {
+      _loadMoreMessages();
+    }
+  }
+
+  Future<void> _loadMoreMessages() async {
+    setState(() => _loadingMore = true);
+    final offset = _messages.where((m) => !m.isPending && !m.isFailed).length;
+    final more = await _chatService.fetchMessages(offset: offset);
+    if (mounted) {
+      setState(() {
+        if (more.isEmpty || more.length < 100) _hasMore = false;
+        if (more.isNotEmpty)
+          _setMessages(_chatService.mergeMessages(_messages, more));
+        _loadingMore = false;
+      });
+    }
   }
 
   Future<void> _init() async {
     final msgs = await _chatService.fetchMessages();
     final partner = await _chatService.fetchPartnerProfile();
     setState(() {
-      _messages = msgs;
       _partner = partner;
+      _setMessages(msgs);
       _loading = false;
     });
 
@@ -67,10 +95,11 @@ class _ChatScreenState extends State<ChatScreen> {
       if (event is Message) {
         _handleIncomingMessage(event);
       } else if (event is Map && event['type'] == 'nudge') {
-        _handleNudge(event);
-      } else {
-        // Reaction update — re-fetch messages
-        _updateReactions();
+        _handleNudge();
+      } else if (event is Map && event['type'] == 'reaction') {
+        // P1 fix: only re-fetch the single affected message.
+        final messageId = event['message_id'] as String?;
+        if (messageId != null) _refreshSingleMessage(messageId);
       }
     });
 
@@ -78,6 +107,19 @@ class _ChatScreenState extends State<ChatScreen> {
     await _initNotifications();
     _startIncomingCallListener();
     _scrollToBottom();
+  }
+
+  // Keep _messages and its O(1) index in sync.
+  void _setMessages(List<Message> msgs) {
+    _messages = msgs;
+    _messageIndex = {for (final m in msgs) m.id: m};
+  }
+
+  Future<void> _refreshSingleMessage(String messageId) async {
+    final updated = await _chatService.fetchMessageById(messageId);
+    if (mounted && updated != null) {
+      setState(() => _replaceMessage(messageId, updated));
+    }
   }
 
   void _startIncomingCallListener() {
@@ -88,17 +130,14 @@ class _ChatScreenState extends State<ChatScreen> {
   }
 
   Future<void> _handleIncomingCallOffer(IncomingCallOffer offer) async {
-    if (!mounted || _showingIncomingCall) {
-      return;
-    }
-
+    if (!mounted || _showingIncomingCall) return;
     _showingIncomingCall = true;
     final accepted = await showModalBottomSheet<bool>(
       context: context,
       backgroundColor: Colors.transparent,
       isDismissible: false,
       enableDrag: false,
-      builder: (context) => _IncomingCallSheet(
+      builder: (_) => IncomingCallSheet(
         callerName: offer.callerName,
         videoCall: offer.videoCall,
       ),
@@ -106,31 +145,24 @@ class _ChatScreenState extends State<ChatScreen> {
     _showingIncomingCall = false;
 
     final service = _incomingCallService;
-    if (service == null) {
-      return;
-    }
+    if (service == null) return;
 
     if (accepted == true) {
       _incomingCallService = null;
-      await Navigator.of(context).push(
-        MaterialPageRoute(
-          builder: (_) => CallScreen(
-            videoCall: offer.videoCall,
-            callService: service,
-            incomingCall: offer,
-          ),
+      await Navigator.of(context).push(MaterialPageRoute(
+        builder: (_) => CallScreen(
+          videoCall: offer.videoCall,
+          callService: service,
+          incomingCall: offer,
         ),
-      );
-      if (mounted) {
-        _startIncomingCallListener();
-      }
+      ));
+      if (mounted) _startIncomingCallListener();
       return;
     }
-
     await service.rejectCall(callerId: offer.callerId);
   }
 
-  void _handleNudge(Map event) {
+  void _handleNudge() {
     if (!mounted) return;
     ScaffoldMessenger.of(context).showSnackBar(
       const SnackBar(
@@ -143,51 +175,28 @@ class _ChatScreenState extends State<ChatScreen> {
 
   Future<void> _initNotifications() async {
     final status = await _notificationService.getStatus();
-    if (!mounted) {
-      return;
-    }
-
+    if (!mounted) return;
     setState(() => _pushStatus = status);
-
     if (status.granted && _notificationService.isConfigured) {
       await _notificationService.syncPushSubscription();
     }
   }
 
   Future<void> _enableNotifications() async {
-    if (_registeringNotifications) {
-      return;
-    }
-
+    if (_registeringNotifications) return;
     setState(() => _registeringNotifications = true);
     final enabled = await _notificationService.requestPermissionAndSync();
     final status = await _notificationService.getStatus();
-
-    if (!mounted) {
-      return;
-    }
-
+    if (!mounted) return;
     setState(() {
       _pushStatus = status;
       _registeringNotifications = false;
     });
-
-    ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(
-        content: Text(
-          enabled
-              ? 'Notifications enabled for this device'
-              : 'Notifications were not enabled',
-        ),
+    ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+      content: Text(
+        enabled ? 'Notifications enabled' : 'Notifications were not enabled',
       ),
-    );
-  }
-
-  Future<void> _updateReactions() async {
-    final msgs = await _chatService.fetchMessages();
-    if (mounted) {
-      setState(() => _messages = _mergeWithPending(msgs));
-    }
+    ));
   }
 
   void _scrollToBottom() {
@@ -206,34 +215,25 @@ class _ChatScreenState extends State<ChatScreen> {
     final text = _textCtrl.text.trim();
     if (text.isEmpty || _sending) return;
     final replyId = _replyingTo?.id;
-    final draft = _chatService.createOptimisticMessage(
-      content: text,
-      replyToId: replyId,
-    );
+    final draft =
+        _chatService.createOptimisticMessage(content: text, replyToId: replyId);
     _textCtrl.clear();
     setState(() {
       _sending = true;
       _replyingTo = null;
-      _messages = _chatService.mergeMessages(_messages, [draft]);
+      _setMessages(_chatService.mergeMessages(_messages, [draft]));
     });
     _scrollToBottom();
     _chatService.updatePresenceStatus('online');
     try {
       final sent = await _chatService.sendMessage(text, replyToId: replyId);
-      if (mounted) {
-        setState(() => _replaceMessage(draft.id, sent));
-      }
+      if (mounted) setState(() => _replaceMessage(draft.id, sent));
     } catch (_) {
       if (mounted) {
-        setState(() {
-          _replaceMessage(
-            draft.id,
-            draft.copyWith(deliveryStatus: MessageDeliveryStatus.failed),
-          );
-        });
+        setState(() => _replaceMessage(draft.id,
+            draft.copyWith(deliveryStatus: MessageDeliveryStatus.failed)));
         ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text('Message failed to send')),
-        );
+            const SnackBar(content: Text('Message failed to send')));
       }
     } finally {
       if (mounted) setState(() => _sending = false);
@@ -242,90 +242,70 @@ class _ChatScreenState extends State<ChatScreen> {
 
   Future<void> _pickAndSendImage() async {
     final picked = await _imagePicker.pickImage(
-      source: ImageSource.gallery,
-      imageQuality: 70,
-      maxWidth: 1000,
-    );
+        source: ImageSource.gallery, imageQuality: 70, maxWidth: 1000);
     if (picked == null) return;
     final bytes = await picked.readAsBytes();
     final replyId = _replyingTo?.id;
     final draft = _chatService.createOptimisticMessage(
-      mediaType: 'image',
-      replyToId: replyId,
-    );
+        mediaType: 'image', replyToId: replyId);
     if (mounted) {
       setState(() {
         _replyingTo = null;
-        _messages = _chatService.mergeMessages(_messages, [draft]);
+        _setMessages(_chatService.mergeMessages(_messages, [draft]));
       });
       _scrollToBottom();
     }
     try {
-      final sent = await _chatService.sendMedia(
-        bytes,
-        'image',
-        replyToId: replyId,
-      );
-      if (mounted) {
-        setState(() => _replaceMessage(draft.id, sent));
-      }
+      final sent =
+          await _chatService.sendMedia(bytes, 'image', replyToId: replyId);
+      if (mounted) setState(() => _replaceMessage(draft.id, sent));
     } catch (_) {
       if (mounted) {
-        setState(() {
-          _replaceMessage(
-            draft.id,
-            draft.copyWith(deliveryStatus: MessageDeliveryStatus.failed),
-          );
-        });
+        setState(() => _replaceMessage(draft.id,
+            draft.copyWith(deliveryStatus: MessageDeliveryStatus.failed)));
         ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text('Image failed to send')),
-        );
+            const SnackBar(content: Text('Image failed to send')));
       }
     }
   }
 
   Future<void> _toggleRecording() async {
     if (_isRecording) {
-      final path = await _audioRecorder.stop();
+      final blobUrl = await _audioRecorder.stop();
       setState(() => _isRecording = false);
-      if (path != null) {
-        await _sendVoiceRecording(path);
-      }
+      if (blobUrl != null) await _sendVoiceRecording(blobUrl);
     } else {
       if (await _audioRecorder.hasPermission()) {
         await _audioRecorder.start(
           const RecordConfig(encoder: AudioEncoder.opus, bitRate: 128000),
-          path: '',
+          path: '', // ignored on web; stop() returns a blob URL
         );
         setState(() => _isRecording = true);
       }
     }
   }
 
-  Future<void> _sendVoiceRecording(String url) async {
+  // B1/B2 fix: use FileDownloader.fetchBytes to read web blob URLs.
+  Future<void> _sendVoiceRecording(String blobUrl) async {
+    final replyId = _replyingTo?.id;
+    final draft = _chatService.createOptimisticMessage(
+        mediaType: 'voice', replyToId: replyId);
+    if (mounted) {
+      setState(() {
+        _replyingTo = null;
+        _setMessages(_chatService.mergeMessages(_messages, [draft]));
+      });
+      _scrollToBottom();
+    }
     try {
-      final res = await http.get(Uri.parse(url));
-      final bytes = res.bodyBytes;
-      final replyId = _replyingTo?.id;
-      final draft = _chatService.createOptimisticMessage(
-        mediaType: 'voice',
-        replyToId: replyId,
-      );
-      if (mounted) {
-        setState(() {
-          _replyingTo = null;
-          _messages = _chatService.mergeMessages(_messages, [draft]);
-        });
-        _scrollToBottom();
-      }
+      final bytes = await FileDownloader.fetchBytes(blobUrl);
       final sent =
           await _chatService.sendMedia(bytes, 'voice', replyToId: replyId);
       if (mounted) setState(() => _replaceMessage(draft.id, sent));
     } catch (_) {
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text('Voice failed to send')),
-        );
+            const SnackBar(content: Text('Voice failed to send')));
       }
     }
   }
@@ -333,89 +313,59 @@ class _ChatScreenState extends State<ChatScreen> {
   Future<void> _sendSticker(String url) async {
     final replyId = _replyingTo?.id;
     final draft = _chatService.createOptimisticMessage(
-      mediaUrl: url,
-      mediaType: 'sticker',
-      replyToId: replyId,
-    );
+        mediaUrl: url, mediaType: 'sticker', replyToId: replyId);
     if (mounted) {
       setState(() {
         _replyingTo = null;
-        _messages = _chatService.mergeMessages(_messages, [draft]);
+        _setMessages(_chatService.mergeMessages(_messages, [draft]));
       });
       Navigator.pop(context);
       _scrollToBottom();
     }
     try {
       final sent = await _chatService.sendSticker(url, replyToId: replyId);
-      if (mounted) {
-        setState(() => _replaceMessage(draft.id, sent));
-      }
+      if (mounted) setState(() => _replaceMessage(draft.id, sent));
     } catch (_) {
       if (mounted) {
-        setState(() {
-          _replaceMessage(
-            draft.id,
-            draft.copyWith(deliveryStatus: MessageDeliveryStatus.failed),
-          );
-        });
+        setState(() => _replaceMessage(draft.id,
+            draft.copyWith(deliveryStatus: MessageDeliveryStatus.failed)));
         ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text('Sticker failed to send')),
-        );
+            const SnackBar(content: Text('Sticker failed to send')));
       }
     }
   }
 
   void _handleIncomingMessage(Message event) {
-    if (!mounted) {
-      return;
-    }
-
+    if (!mounted) return;
     setState(() {
-      final pendingMatchIndex = _messages.indexWhere(
-        (message) =>
-            message.isPending &&
-            message.senderId == event.senderId &&
-            message.content == event.content &&
-            message.mediaUrl == event.mediaUrl &&
-            message.mediaType == event.mediaType &&
-            message.replyToId == event.replyToId &&
-            message.createdAt
-                    .difference(event.createdAt)
-                    .inSeconds
-                    .abs() <=
-                10,
-      );
+      final pendingIdx = _messages.indexWhere((m) =>
+          m.isPending &&
+          m.senderId == event.senderId &&
+          m.content == event.content &&
+          m.mediaUrl == event.mediaUrl &&
+          m.mediaType == event.mediaType &&
+          m.replyToId == event.replyToId &&
+          m.createdAt.difference(event.createdAt).inSeconds.abs() <= 10);
 
-      if (pendingMatchIndex != -1) {
-        _messages[pendingMatchIndex] = event;
-        _messages = _chatService.mergeMessages(_messages, const []);
-      } else if (_messages.indexWhere((message) => message.id == event.id) ==
-          -1) {
-        _messages = _chatService.mergeMessages(_messages, [event]);
+      if (pendingIdx != -1) {
+        _messages[pendingIdx] = event;
+        _setMessages(_chatService.mergeMessages(_messages, const []));
+      } else if (!_messageIndex.containsKey(event.id)) {
+        _setMessages(_chatService.mergeMessages(_messages, [event]));
       }
     });
-
     _scrollToBottom();
-    if (event.senderId != _myId) {
-      _chatService.markAsRead();
-    }
-  }
-
-  List<Message> _mergeWithPending(List<Message> fetchedMessages) {
-    final pending = _messages
-        .where((message) => message.isPending || message.isFailed)
-        .toList();
-    return _chatService.mergeMessages(fetchedMessages, pending);
+    if (event.senderId != _myId) _chatService.markAsRead();
   }
 
   void _replaceMessage(String oldId, Message replacement) {
-    final index = _messages.indexWhere((message) => message.id == oldId);
+    final index = _messages.indexWhere((m) => m.id == oldId);
     if (index == -1) {
-      _messages = _chatService.mergeMessages(_messages, [replacement]);
+      _setMessages(_chatService.mergeMessages(_messages, [replacement]));
       return;
     }
     _messages[index] = replacement;
-    _messages = _chatService.mergeMessages(_messages, const []);
+    _setMessages(_chatService.mergeMessages(_messages, const []));
   }
 
   @override
@@ -428,20 +378,15 @@ class _ChatScreenState extends State<ChatScreen> {
     super.dispose();
   }
 
-  // ══════════════════════════════════════════════════
-  // ═══  iMessage UI  ═══════════════════════════════
-  // ══════════════════════════════════════════════════
-
   bool _isSameSender(int i, int j) {
     if (j < 0 || j >= _messages.length) return false;
-    return (_messages[i].senderId == _myId) ==
-        (_messages[j].senderId == _myId);
+    return (_messages[i].senderId == _myId) == (_messages[j].senderId == _myId);
   }
 
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      backgroundColor: Colors.grey[100],
+      backgroundColor: const Color(0xFFF2F2F7), // iOS system background
       body: SafeArea(
         child: Column(
           children: [
@@ -449,7 +394,7 @@ class _ChatScreenState extends State<ChatScreen> {
             if (_shouldShowNotificationPrompt) _buildNotificationPrompt(),
             Expanded(child: _buildMessageList()),
             if (_partnerPresence?['status'] == 'typing')
-              const _TypingIndicator(),
+              const TypingIndicator(),
             _buildInputBar(),
           ],
         ),
@@ -457,7 +402,12 @@ class _ChatScreenState extends State<ChatScreen> {
     );
   }
 
-  // ── iOS-style top bar ──
+  bool get _shouldShowNotificationPrompt {
+    if (!_notificationService.isConfigured) return false;
+    final status = _pushStatus;
+    return status != null && status.supported && !status.granted;
+  }
+
   Widget _buildHeader() {
     final partnerName = _partner?.name ?? '...';
     final online = _partnerPresence?['status'] == 'online';
@@ -468,13 +418,11 @@ class _ChatScreenState extends State<ChatScreen> {
       padding: const EdgeInsets.fromLTRB(4, 6, 4, 10),
       decoration: BoxDecoration(
         color: Colors.white.withValues(alpha: 0.97),
-        border: Border(
-          bottom: BorderSide(color: Colors.grey[300]!, width: 0.5),
-        ),
+        border:
+            Border(bottom: BorderSide(color: Colors.grey[300]!, width: 0.5)),
       ),
       child: Row(
         children: [
-          // Nudge button
           IconButton(
             icon: const Icon(Icons.waving_hand_outlined,
                 color: Color(0xFF007AFF), size: 22),
@@ -483,28 +431,22 @@ class _ChatScreenState extends State<ChatScreen> {
                 await _chatService.sendNudge(_partner!.id);
                 if (mounted) {
                   ScaffoldMessenger.of(context).showSnackBar(
-                    const SnackBar(content: Text('Nudge sent!')),
-                  );
+                      const SnackBar(content: Text('Nudge sent!')));
                 }
               }
             },
           ),
-          // Avatar
           _buildAvatar(partnerName, online),
           const SizedBox(width: 10),
-          // Name + status
           Expanded(
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                Text(
-                  partnerName,
-                  style: const TextStyle(
-                    fontSize: 17,
-                    fontWeight: FontWeight.w600,
-                    color: Colors.black,
-                  ),
-                ),
+                Text(partnerName,
+                    style: const TextStyle(
+                        fontSize: 17,
+                        fontWeight: FontWeight.w600,
+                        color: Colors.black)),
                 Text(
                   typing
                       ? 'typing...'
@@ -523,7 +465,6 @@ class _ChatScreenState extends State<ChatScreen> {
               ],
             ),
           ),
-          // Call buttons
           IconButton(
             icon: const Icon(Icons.phone_outlined,
                 color: Color(0xFF007AFF), size: 22),
@@ -540,88 +481,9 @@ class _ChatScreenState extends State<ChatScreen> {
               await _notificationService.unregisterCurrentDevice();
               await _chatService.updatePresenceStatus('offline');
               await supabase.auth.signOut();
-              // Navigation handled by main.dart StreamBuilder
             },
           ),
         ],
-      ),
-    );
-  }
-
-  bool get _shouldShowNotificationPrompt {
-    if (!_notificationService.isConfigured) {
-      return false;
-    }
-    final status = _pushStatus;
-    return status != null && status.supported && !status.granted;
-  }
-
-  Widget _buildNotificationPrompt() {
-    final status = _pushStatus;
-    if (status == null) {
-      return const SizedBox.shrink();
-    }
-
-    final title = status.canPrompt
-        ? 'Enable notifications'
-        : 'Notifications are blocked';
-    final description = status.canPrompt
-        ? 'Turn on push alerts so new messages can reach this device when the app is closed.'
-        : 'Open your browser or iPhone PWA settings and allow notifications for HillsMeetSea.';
-
-    return Padding(
-      padding: const EdgeInsets.fromLTRB(16, 12, 16, 0),
-      child: Container(
-        padding: const EdgeInsets.all(16),
-        decoration: BoxDecoration(
-          color: Colors.white,
-          borderRadius: BorderRadius.circular(16),
-          border: Border.all(color: Colors.grey[200]!),
-        ),
-        child: Row(
-          children: [
-            Icon(Icons.notifications_active_outlined,
-                color: Colors.grey[700]),
-            const SizedBox(width: 12),
-            Expanded(
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Text(
-                    title,
-                    style: const TextStyle(
-                      fontSize: 14,
-                      fontWeight: FontWeight.w700,
-                      color: Colors.black,
-                    ),
-                  ),
-                  const SizedBox(height: 4),
-                  Text(
-                    description,
-                    style: TextStyle(
-                      fontSize: 12,
-                      color: Colors.grey[600],
-                      height: 1.35,
-                    ),
-                  ),
-                ],
-              ),
-            ),
-            if (status.canPrompt)
-              TextButton(
-                onPressed:
-                    _registeringNotifications ? null : _enableNotifications,
-                child: _registeringNotifications
-                    ? const SizedBox(
-                        width: 16,
-                        height: 16,
-                        child: CircularProgressIndicator(strokeWidth: 2),
-                      )
-                    : const Text('Enable',
-                        style: TextStyle(color: Color(0xFF007AFF))),
-              ),
-          ],
-        ),
       ),
     );
   }
@@ -635,10 +497,7 @@ class _ChatScreenState extends State<ChatScreen> {
           child: Text(
             name.isNotEmpty ? name[0].toUpperCase() : '?',
             style: const TextStyle(
-              fontSize: 16,
-              color: Colors.white,
-              fontWeight: FontWeight.w700,
-            ),
+                fontSize: 16, color: Colors.white, fontWeight: FontWeight.w700),
           ),
         ),
         if (online)
@@ -659,6 +518,65 @@ class _ChatScreenState extends State<ChatScreen> {
     );
   }
 
+  Widget _buildNotificationPrompt() {
+    final status = _pushStatus;
+    if (status == null) return const SizedBox.shrink();
+    final canPrompt = status.canPrompt;
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(16, 12, 16, 0),
+      child: Container(
+        padding: const EdgeInsets.all(16),
+        decoration: BoxDecoration(
+          color: Colors.white,
+          borderRadius: BorderRadius.circular(16),
+          border: Border.all(color: Colors.grey[200]!),
+        ),
+        child: Row(
+          children: [
+            Icon(Icons.notifications_active_outlined, color: Colors.grey[700]),
+            const SizedBox(width: 12),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    canPrompt
+                        ? 'Enable notifications'
+                        : 'Notifications are blocked',
+                    style: const TextStyle(
+                        fontSize: 14,
+                        fontWeight: FontWeight.w700,
+                        color: Colors.black),
+                  ),
+                  const SizedBox(height: 4),
+                  Text(
+                    canPrompt
+                        ? 'Turn on push alerts so new messages can reach this device.'
+                        : 'Open your browser settings and allow notifications.',
+                    style: TextStyle(
+                        fontSize: 12, color: Colors.grey[600], height: 1.35),
+                  ),
+                ],
+              ),
+            ),
+            if (canPrompt)
+              TextButton(
+                onPressed:
+                    _registeringNotifications ? null : _enableNotifications,
+                child: _registeringNotifications
+                    ? const SizedBox(
+                        width: 16,
+                        height: 16,
+                        child: CircularProgressIndicator(strokeWidth: 2))
+                    : const Text('Enable',
+                        style: TextStyle(color: Color(0xFF007AFF))),
+              ),
+          ],
+        ),
+      ),
+    );
+  }
+
   void _startCall(bool video) {
     Navigator.push(
       context,
@@ -666,36 +584,42 @@ class _ChatScreenState extends State<ChatScreen> {
     );
   }
 
-  // ── Message list with grouping logic ──
   Widget _buildMessageList() {
     if (_loading) {
       return const Center(
-        child: CircularProgressIndicator(color: Color(0xFF007AFF)),
-      );
+          child: CircularProgressIndicator(color: Color(0xFF007AFF)));
     }
     if (_messages.isEmpty) {
       return Center(
-        child: Text(
-          'Say something ✨',
-          style: TextStyle(fontSize: 18, color: Colors.grey[400]),
-        ),
+        child: Text('Say something ✨',
+            style: TextStyle(fontSize: 18, color: Colors.grey[400])),
       );
     }
     return ListView.builder(
       controller: _scrollCtrl,
       padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
-      itemCount: _messages.length,
-      itemBuilder: (context, i) {
+      itemCount: _messages.length + (_loadingMore ? 1 : 0),
+      itemBuilder: (context, index) {
+        if (_loadingMore && index == 0) {
+          return const Center(
+            child: Padding(
+              padding: EdgeInsets.all(8),
+              child: SizedBox(
+                  width: 24,
+                  height: 24,
+                  child: CircularProgressIndicator(
+                      strokeWidth: 2, color: Color(0xFF007AFF))),
+            ),
+          );
+        }
+        final i = _loadingMore ? index - 1 : index;
         final msg = _messages[i];
-        final replyTo = msg.replyToId != null
-            ? _messages
-                .cast<Message?>()
-                .firstWhere((m) => m!.id == msg.replyToId, orElse: () => null)
-            : null;
+        // P5 fix: O(1) lookup via pre-built index.
+        final replyTo =
+            msg.replyToId != null ? _messageIndex[msg.replyToId] : null;
         final isMine = msg.senderId == _myId;
         final showDate = i == 0 ||
             _messages[i].createdAt.day != _messages[i - 1].createdAt.day;
-
         final isTop = !_isSameSender(i, i - 1);
         final isBottom = !_isSameSender(i, i + 1);
 
@@ -716,7 +640,7 @@ class _ChatScreenState extends State<ChatScreen> {
           ),
           child: Column(
             children: [
-              if (showDate) _DateDivider(date: msg.createdAt),
+              if (showDate) DateDivider(date: msg.createdAt),
               MessageBubble(
                 message: msg,
                 isMine: isMine,
@@ -733,7 +657,6 @@ class _ChatScreenState extends State<ChatScreen> {
     );
   }
 
-  // ── iMessage input bar ──
   Widget _buildInputBar() {
     return Column(
       mainAxisSize: MainAxisSize.min,
@@ -744,10 +667,8 @@ class _ChatScreenState extends State<ChatScreen> {
           color: Colors.white,
           child: Row(
             children: [
-              // Sticker + Image buttons
               IconButton(
-                icon:
-                    Icon(Icons.add_circle, color: Colors.grey[400], size: 28),
+                icon: Icon(Icons.add_circle, color: Colors.grey[400], size: 28),
                 onPressed: _showStickers,
                 padding: EdgeInsets.zero,
                 constraints: const BoxConstraints(),
@@ -761,7 +682,6 @@ class _ChatScreenState extends State<ChatScreen> {
                 constraints: const BoxConstraints(),
               ),
               const SizedBox(width: 8),
-              // Text input pill
               Expanded(
                 child: Container(
                   padding:
@@ -772,16 +692,12 @@ class _ChatScreenState extends State<ChatScreen> {
                   ),
                   child: TextField(
                     controller: _textCtrl,
-                    onChanged: (v) {
-                      _chatService.updatePresenceStatus(
-                          v.isEmpty ? 'online' : 'typing');
-                    },
-                    style: const TextStyle(
-                        color: Colors.black, fontSize: 16),
+                    onChanged: (v) => _chatService
+                        .updatePresenceStatus(v.isEmpty ? 'online' : 'typing'),
+                    style: const TextStyle(color: Colors.black, fontSize: 16),
                     decoration: const InputDecoration(
-                      hintText: 'iMessage',
-                      hintStyle:
-                          TextStyle(color: Colors.grey, fontSize: 16),
+                      hintText: 'Message…',
+                      hintStyle: TextStyle(color: Colors.grey, fontSize: 16),
                       border: InputBorder.none,
                       contentPadding: EdgeInsets.symmetric(vertical: 8),
                     ),
@@ -791,7 +707,11 @@ class _ChatScreenState extends State<ChatScreen> {
                 ),
               ),
               const SizedBox(width: 8),
-              _buildSendButton(),
+              // P3 fix: ListenableBuilder rebuilds only the send button.
+              ListenableBuilder(
+                listenable: _textCtrl,
+                builder: (_, __) => _buildSendButton(),
+              ),
             ],
           ),
         ),
@@ -808,12 +728,8 @@ class _ChatScreenState extends State<ChatScreen> {
         decoration: BoxDecoration(
           color: Colors.grey[100],
           borderRadius: BorderRadius.circular(12),
-          border: Border(
-            left: BorderSide(
-              color: const Color(0xFF007AFF),
-              width: 3,
-            ),
-          ),
+          border: const Border(
+              left: BorderSide(color: Color(0xFF007AFF), width: 3)),
         ),
         child: Row(
           children: [
@@ -827,14 +743,12 @@ class _ChatScreenState extends State<ChatScreen> {
                         ? 'You'
                         : _partner?.name ?? 'Partner',
                     style: const TextStyle(
-                      fontSize: 11,
-                      fontWeight: FontWeight.w600,
-                      color: Color(0xFF007AFF),
-                    ),
+                        fontSize: 11,
+                        fontWeight: FontWeight.w600,
+                        color: Color(0xFF007AFF)),
                   ),
                   Text(
-                    _replyingTo!.content ??
-                        (_replyingTo!.mediaType ?? 'Media'),
+                    _replyingTo!.content ?? (_replyingTo!.mediaType ?? 'Media'),
                     maxLines: 1,
                     overflow: TextOverflow.ellipsis,
                     style: TextStyle(fontSize: 12, color: Colors.grey[600]),
@@ -865,16 +779,11 @@ class _ChatScreenState extends State<ChatScreen> {
                   width: 14,
                   height: 14,
                   child: CircularProgressIndicator(
-                    strokeWidth: 2,
-                    color: Colors.white,
-                  ),
-                )
-              : const Icon(Icons.arrow_upward,
-                  size: 18, color: Colors.white),
+                      strokeWidth: 2, color: Colors.white))
+              : const Icon(Icons.arrow_upward, size: 18, color: Colors.white),
         ),
       );
     }
-    // Mic button
     return GestureDetector(
       onTap: _toggleRecording,
       child: Icon(
@@ -898,221 +807,6 @@ class _ChatScreenState extends State<ChatScreen> {
             borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
           ),
           child: StickerPicker(onStickerSelected: _sendSticker),
-        ),
-      ),
-    );
-  }
-}
-
-// ── Typing indicator (iMessage style) ──
-class _TypingIndicator extends StatelessWidget {
-  const _TypingIndicator();
-
-  @override
-  Widget build(BuildContext context) {
-    return Padding(
-      padding: const EdgeInsets.only(left: 14, bottom: 6),
-      child: Row(
-        children: [
-          Container(
-            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
-            decoration: BoxDecoration(
-              color: const Color(0xFFE5E5EA),
-              borderRadius: BorderRadius.circular(20),
-            ),
-            child: const Row(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                _Dot(delay: 0),
-                SizedBox(width: 4),
-                _Dot(delay: 200),
-                SizedBox(width: 4),
-                _Dot(delay: 400),
-              ],
-            ),
-          ),
-        ],
-      ),
-    );
-  }
-}
-
-class _Dot extends StatefulWidget {
-  final int delay;
-  const _Dot({required this.delay});
-
-  @override
-  State<_Dot> createState() => _DotState();
-}
-
-class _DotState extends State<_Dot> with SingleTickerProviderStateMixin {
-  late AnimationController _controller;
-
-  @override
-  void initState() {
-    super.initState();
-    _controller = AnimationController(
-      vsync: this,
-      duration: const Duration(milliseconds: 600),
-    );
-    Future.delayed(Duration(milliseconds: widget.delay), () {
-      if (mounted) _controller.repeat(reverse: true);
-    });
-  }
-
-  @override
-  void dispose() {
-    _controller.dispose();
-    super.dispose();
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    return FadeTransition(
-      opacity: _controller,
-      child: CircleAvatar(radius: 4, backgroundColor: Colors.grey[500]),
-    );
-  }
-}
-
-// ── Incoming call sheet ──
-class _IncomingCallSheet extends StatelessWidget {
-  final String callerName;
-  final bool videoCall;
-
-  const _IncomingCallSheet({
-    required this.callerName,
-    required this.videoCall,
-  });
-
-  @override
-  Widget build(BuildContext context) {
-    return SafeArea(
-      child: Padding(
-        padding: const EdgeInsets.fromLTRB(16, 0, 16, 24),
-        child: Container(
-          padding: const EdgeInsets.all(24),
-          decoration: BoxDecoration(
-            color: Colors.white,
-            borderRadius: BorderRadius.circular(28),
-            boxShadow: [
-              BoxShadow(
-                color: Colors.black.withValues(alpha: 0.15),
-                blurRadius: 30,
-                spreadRadius: 2,
-              ),
-            ],
-          ),
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              CircleAvatar(
-                radius: 32,
-                backgroundColor: Colors.grey[300],
-                child: Text(
-                  callerName.isNotEmpty ? callerName[0].toUpperCase() : '?',
-                  style: const TextStyle(
-                    fontSize: 28,
-                    fontWeight: FontWeight.w700,
-                    color: Colors.white,
-                  ),
-                ),
-              ),
-              const SizedBox(height: 16),
-              Text(
-                callerName,
-                style: const TextStyle(
-                  fontSize: 20,
-                  fontWeight: FontWeight.w700,
-                  color: Colors.black,
-                ),
-              ),
-              const SizedBox(height: 6),
-              Text(
-                videoCall ? 'Incoming video call' : 'Incoming voice call',
-                style: TextStyle(fontSize: 13, color: Colors.grey[600]),
-              ),
-              const SizedBox(height: 20),
-              Row(
-                mainAxisAlignment: MainAxisAlignment.center,
-                children: [
-                  _IncomingCallAction(
-                    color: Colors.red,
-                    icon: Icons.call_end,
-                    onTap: () => Navigator.of(context).pop(false),
-                  ),
-                  const SizedBox(width: 20),
-                  _IncomingCallAction(
-                    color: const Color(0xFF34C759),
-                    icon: videoCall ? Icons.videocam : Icons.call,
-                    onTap: () => Navigator.of(context).pop(true),
-                  ),
-                ],
-              ),
-            ],
-          ),
-        ),
-      ),
-    );
-  }
-}
-
-class _IncomingCallAction extends StatelessWidget {
-  final Color color;
-  final IconData icon;
-  final VoidCallback onTap;
-
-  const _IncomingCallAction({
-    required this.color,
-    required this.icon,
-    required this.onTap,
-  });
-
-  @override
-  Widget build(BuildContext context) {
-    return GestureDetector(
-      onTap: onTap,
-      child: Container(
-        width: 64,
-        height: 64,
-        decoration: BoxDecoration(
-          shape: BoxShape.circle,
-          color: color,
-        ),
-        child: Icon(icon, color: Colors.white, size: 28),
-      ),
-    );
-  }
-}
-
-// ── Date divider ──
-class _DateDivider extends StatelessWidget {
-  final DateTime date;
-  const _DateDivider({required this.date});
-
-  String _format() {
-    final now = DateTime.now();
-    final diff = now.difference(date).inDays;
-    if (diff == 0) return 'Today';
-    if (diff == 1) return 'Yesterday';
-    return '${date.day}/${date.month}/${date.year}';
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    return Padding(
-      padding: const EdgeInsets.symmetric(vertical: 12),
-      child: Center(
-        child: Container(
-          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
-          decoration: BoxDecoration(
-            color: Colors.grey[300],
-            borderRadius: BorderRadius.circular(10),
-          ),
-          child: Text(
-            _format(),
-            style: TextStyle(fontSize: 11, color: Colors.grey[700]),
-          ),
         ),
       ),
     );

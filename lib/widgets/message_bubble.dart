@@ -1,11 +1,14 @@
+import 'dart:math' show max;
+
 import 'package:flutter/material.dart';
 import 'package:cached_network_image/cached_network_image.dart';
 import 'package:timeago/timeago.dart' as timeago;
 import 'package:audioplayers/audioplayers.dart';
+
+import '../core/supabase_client.dart';
 import '../models/message.dart';
 import '../services/sticker_service.dart';
 import '../utils/downloader.dart';
-import '../main.dart';
 
 class MessageBubble extends StatelessWidget {
   final Message message;
@@ -15,6 +18,9 @@ class MessageBubble extends StatelessWidget {
   final Message? replyToMessage;
   final Function(Message)? onReply;
   final Function(Message, String)? onReact;
+
+  // Shared sticker service — const so it's a singleton per app.
+  static const _stickerService = StickerService();
 
   const MessageBubble({
     super.key,
@@ -123,18 +129,22 @@ class MessageBubble extends StatelessWidget {
     if (message.mediaType == 'sticker' && message.mediaUrl != null) {
       return _StickerBubble(url: message.mediaUrl!, isMine: isMine);
     }
-    if (message.mediaType == 'voice' && (message.mediaPath != null || message.mediaUrl != null)) {
+    if (message.mediaType == 'voice' &&
+        (message.mediaPath != null || message.mediaUrl != null)) {
       return _SignedMediaBubble(
         path: message.mediaPath,
         fallbackUrl: message.mediaUrl,
-        builder: (signedUrl) => _VoiceBubble(url: signedUrl, isMine: isMine, radius: _bubbleRadius),
+        builder: (url) =>
+            _VoiceBubble(url: url, isMine: isMine, radius: _bubbleRadius),
       );
     }
-    if (message.isImage && (message.mediaPath != null || message.mediaUrl != null)) {
+    if (message.isImage &&
+        (message.mediaPath != null || message.mediaUrl != null)) {
       return _SignedMediaBubble(
         path: message.mediaPath,
         fallbackUrl: message.mediaUrl,
-        builder: (signedUrl) => _ImageBubble(url: signedUrl, isMine: isMine, radius: _bubbleRadius),
+        builder: (url) =>
+            _ImageBubble(url: url, isMine: isMine, radius: _bubbleRadius),
       );
     }
 
@@ -159,10 +169,9 @@ class MessageBubble extends StatelessWidget {
 
   Widget _buildReactions() {
     final reactionCounts = <String, int>{};
-    for (var r in message.reactions!) {
+    for (final r in message.reactions!) {
       reactionCounts[r.emoji] = (reactionCounts[r.emoji] ?? 0) + 1;
     }
-
     return Container(
       margin: const EdgeInsets.only(top: 4),
       child: Row(
@@ -263,11 +272,11 @@ class MessageBubble extends StatelessWidget {
                 leading: Icon(Icons.add_to_photos, color: Colors.grey[700]),
                 title: const Text('Save Sticker'),
                 onTap: () {
-                  StickerService().saveSticker(message.mediaUrl!);
+                  _stickerService.saveSticker(message.mediaUrl!);
                   Navigator.pop(ctx);
                   ScaffoldMessenger.of(context).showSnackBar(
                     const SnackBar(
-                        content: Text('Sticker Saved to Collection')),
+                        content: Text('Sticker saved to collection')),
                   );
                 },
               ),
@@ -297,18 +306,17 @@ class MessageBubble extends StatelessWidget {
   Future<String?> _resolveDownloadUrl() async {
     final path = message.mediaPath;
     if (path != null && path.isNotEmpty) {
-      final signed = await supabase.storage.from('media').createSignedUrl(path, 60);
-      return signed;
+      return supabase.storage.from('media').createSignedUrl(path, 3600);
     }
     final url = message.mediaUrl;
-    if (url != null && url.isNotEmpty) {
-      return url;
-    }
+    if (url != null && url.isNotEmpty) return url;
     return null;
   }
 }
 
-class _SignedMediaBubble extends StatelessWidget {
+// ── Signed-URL media wrapper — caches the future to prevent repeated network
+// calls on every widget rebuild (P2 fix). ──────────────────────────────────
+class _SignedMediaBubble extends StatefulWidget {
   final String? path;
   final String? fallbackUrl;
   final Widget Function(String url) builder;
@@ -320,18 +328,33 @@ class _SignedMediaBubble extends StatelessWidget {
   });
 
   @override
+  State<_SignedMediaBubble> createState() => _SignedMediaBubbleState();
+}
+
+class _SignedMediaBubbleState extends State<_SignedMediaBubble> {
+  Future<String>? _urlFuture;
+  String? _cachedPath;
+
+  Future<String> _getUrlFuture(String path) {
+    if (_urlFuture == null || _cachedPath != path) {
+      _cachedPath = path;
+      // 1-hour signed URL — avoids re-signing on every rebuild.
+      _urlFuture = supabase.storage.from('media').createSignedUrl(path, 3600);
+    }
+    return _urlFuture!;
+  }
+
+  @override
   Widget build(BuildContext context) {
-    final p = path;
+    final p = widget.path;
     if (p == null || p.isEmpty) {
-      final url = fallbackUrl;
-      if (url == null || url.isEmpty) {
-        return const SizedBox.shrink();
-      }
-      return builder(url);
+      final url = widget.fallbackUrl;
+      if (url == null || url.isEmpty) return const SizedBox.shrink();
+      return widget.builder(url);
     }
 
     return FutureBuilder<String>(
-      future: supabase.storage.from('media').createSignedUrl(p, 60),
+      future: _getUrlFuture(p),
       builder: (context, snapshot) {
         final url = snapshot.data;
         if (url == null || url.isEmpty) {
@@ -341,7 +364,7 @@ class _SignedMediaBubble extends StatelessWidget {
             child: Center(child: CircularProgressIndicator()),
           );
         }
-        return builder(url);
+        return widget.builder(url);
       },
     );
   }
@@ -352,8 +375,11 @@ class _ImageBubble extends StatelessWidget {
   final bool isMine;
   final BorderRadius radius;
 
-  const _ImageBubble(
-      {required this.url, required this.isMine, required this.radius});
+  const _ImageBubble({
+    required this.url,
+    required this.isMine,
+    required this.radius,
+  });
 
   @override
   Widget build(BuildContext context) {
@@ -410,8 +436,11 @@ class _VoiceBubble extends StatefulWidget {
   final bool isMine;
   final BorderRadius radius;
 
-  const _VoiceBubble(
-      {required this.url, required this.isMine, required this.radius});
+  const _VoiceBubble({
+    required this.url,
+    required this.isMine,
+    required this.radius,
+  });
 
   @override
   State<_VoiceBubble> createState() => _VoiceBubbleState();
@@ -427,9 +456,15 @@ class _VoiceBubbleState extends State<_VoiceBubble> {
   void initState() {
     super.initState();
     _player = AudioPlayer();
-    _player.onDurationChanged.listen((d) => setState(() => _duration = d));
-    _player.onPositionChanged.listen((p) => setState(() => _position = p));
-    _player.onPlayerComplete.listen((_) => setState(() => _isPlaying = false));
+    _player.onDurationChanged.listen((d) {
+      if (mounted) setState(() => _duration = d);
+    });
+    _player.onPositionChanged.listen((p) {
+      if (mounted) setState(() => _position = p);
+    });
+    _player.onPlayerComplete.listen((_) {
+      if (mounted) setState(() => _isPlaying = false);
+    });
   }
 
   @override
@@ -440,15 +475,15 @@ class _VoiceBubbleState extends State<_VoiceBubble> {
 
   @override
   Widget build(BuildContext context) {
-    final bg = widget.isMine
-        ? const Color(0xFF007AFF)
-        : const Color(0xFFE5E5EA);
+    final bg =
+        widget.isMine ? const Color(0xFF007AFF) : const Color(0xFFE5E5EA);
     final iconColor = widget.isMine ? Colors.white : Colors.grey[700]!;
-    final sliderActive =
-        widget.isMine ? Colors.white : const Color(0xFF007AFF);
-    final sliderInactive = widget.isMine
-        ? Colors.white.withValues(alpha: 0.3)
-        : Colors.grey[400]!;
+    final sliderActive = widget.isMine ? Colors.white : const Color(0xFF007AFF);
+    final sliderInactive =
+        widget.isMine ? Colors.white.withValues(alpha: 0.3) : Colors.grey[400]!;
+
+    // B5 fix: max must be > 0; use max(1.0, …) to prevent Slider assertion.
+    final sliderMax = max(1.0, _duration.inMilliseconds.toDouble());
 
     return Container(
       width: 200,
@@ -468,24 +503,22 @@ class _VoiceBubbleState extends State<_VoiceBubble> {
               } else {
                 await _player.play(UrlSource(widget.url));
               }
-              setState(() => _isPlaying = !_isPlaying);
+              if (mounted) setState(() => _isPlaying = !_isPlaying);
             },
           ),
           Expanded(
             child: SliderTheme(
               data: SliderThemeData(
-                thumbShape:
-                    const RoundSliderThumbShape(enabledThumbRadius: 6),
+                thumbShape: const RoundSliderThumbShape(enabledThumbRadius: 6),
                 trackHeight: 3,
                 activeTrackColor: sliderActive,
                 inactiveTrackColor: sliderInactive,
                 thumbColor: sliderActive,
               ),
               child: Slider(
-                value: _position.inMilliseconds.toDouble(),
-                max: _duration.inMilliseconds.toDouble() > 0
-                    ? _duration.inMilliseconds.toDouble()
-                    : 1,
+                value:
+                    _position.inMilliseconds.toDouble().clamp(0.0, sliderMax),
+                max: sliderMax,
                 onChanged: (v) =>
                     _player.seek(Duration(milliseconds: v.toInt())),
               ),

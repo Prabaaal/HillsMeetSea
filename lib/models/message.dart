@@ -1,8 +1,4 @@
-enum MessageDeliveryStatus {
-  sending,
-  sent,
-  failed,
-}
+enum MessageDeliveryStatus { sending, sent, failed }
 
 class Message {
   final String id;
@@ -107,34 +103,6 @@ class MessageReaction {
       messageId: json['message_id'] as String,
       userId: json['user_id'] as String,
       emoji: json['emoji'] as String,
-    );
-  }
-}
-
-class Profile {
-  final String id;
-  final String name;
-  final String? avatarUrl;
-  final String status;
-  final DateTime? lastSeen;
-
-  const Profile({
-    required this.id,
-    required this.name,
-    this.avatarUrl,
-    this.status = 'offline',
-    this.lastSeen,
-  });
-
-  factory Profile.fromJson(Map<String, dynamic> json) {
-    return Profile(
-      id: json['id'] as String,
-      name: json['name'] as String,
-      avatarUrl: json['avatar_url'] as String?,
-      status: json['status'] as String? ?? 'offline',
-      lastSeen: json['last_seen'] != null
-          ? DateTime.parse(json['last_seen'] as String)
-          : null,
     );
   }
 }

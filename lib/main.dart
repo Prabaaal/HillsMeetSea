@@ -1,14 +1,15 @@
 import 'package:flutter/material.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 import 'package:google_fonts/google_fonts.dart';
+
+import 'config/env.dart';
+import 'core/supabase_client.dart';
 import 'screens/auth_screen.dart';
 import 'screens/chat_screen.dart';
-import 'env.dart';
 
-// ── Replace these with your actual Supabase project values ──
+// VAPID key for Web Push notifications — injected at build time.
 const String pushVapidPublicKey =
     String.fromEnvironment('PUSH_VAPID_PUBLIC_KEY', defaultValue: '');
-// ────────────────────────────────────────────────────────────
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -16,15 +17,11 @@ Future<void> main() async {
   await Supabase.initialize(
     url: Env.supabaseUrl,
     anonKey: Env.supabaseAnonKey,
-    realtimeClientOptions: const RealtimeClientOptions(
-      eventsPerSecond: 40,
-    ),
+    realtimeClientOptions: const RealtimeClientOptions(eventsPerSecond: 40),
   );
 
   runApp(const HillsMeetSeaApp());
 }
-
-final supabase = Supabase.instance.client;
 
 class HillsMeetSeaApp extends StatelessWidget {
   const HillsMeetSeaApp({super.key});
@@ -39,9 +36,7 @@ class HillsMeetSeaApp extends StatelessWidget {
         stream: supabase.auth.onAuthStateChange,
         builder: (context, snapshot) {
           final session = supabase.auth.currentSession;
-          if (session != null) {
-            return const ChatScreen();
-          }
+          if (session != null) return const ChatScreen();
           return const AuthScreen();
         },
       ),

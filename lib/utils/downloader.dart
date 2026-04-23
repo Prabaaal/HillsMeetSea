@@ -1,8 +1,10 @@
 import 'dart:js_interop';
+import 'dart:typed_data';
+
 import 'package:web/web.dart' as web;
 
 class FileDownloader {
-  /// Simple download via anchor tag
+  /// Simple download via anchor tag.
   static void download(String url, String filename) {
     final anchor = web.document.createElement('a') as web.HTMLAnchorElement;
     anchor.href = url;
@@ -10,8 +12,8 @@ class FileDownloader {
     anchor.click();
   }
 
-  /// Blob-based download for cross-origin Safari issues.
-  /// Falls back to simple download on error.
+  /// Blob-based download — works around cross-origin Safari issues.
+  /// Falls back to [download] on error.
   static Future<void> downloadBlob(String url, String filename) async {
     try {
       final response = await web.window.fetch(url.toJS).toDart;
@@ -24,9 +26,16 @@ class FileDownloader {
       anchor.click();
 
       web.URL.revokeObjectURL(objectUrl);
-    } catch (e) {
-      // Fallback to simple download
+    } catch (_) {
       download(url, filename);
     }
+  }
+
+  /// Reads a URL (including blob: URLs produced by the audio recorder on web)
+  /// into raw bytes.
+  static Future<Uint8List> fetchBytes(String url) async {
+    final response = await web.window.fetch(url.toJS).toDart;
+    final buffer = await response.arrayBuffer().toDart;
+    return buffer.toDart.asUint8List();
   }
 }

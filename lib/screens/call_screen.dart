@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_webrtc/flutter_webrtc.dart';
 import 'package:google_fonts/google_fonts.dart';
+
 import '../services/call_service.dart';
 import '../widgets/glass_container.dart';
 
@@ -35,42 +36,44 @@ class _CallScreenState extends State<CallScreen> {
   void initState() {
     super.initState();
     _callService = widget.callService ?? CallService();
-    _state = widget.incomingCall != null ? CallState.connecting : CallState.calling;
+    _state =
+        widget.incomingCall != null ? CallState.connecting : CallState.calling;
     _stopwatch = Stopwatch();
-    _initRenderers();
-    if (widget.incomingCall != null) {
-      _answerIncomingCall();
-    } else {
-      _startCall();
-    }
 
     _callService.callState.listen((state) {
-      if (mounted) {
-        setState(() => _state = state);
-        if (state == CallState.connected && !_stopwatch.isRunning) {
-          _stopwatch.start();
-          _startTimer();
-        }
-        if (state == CallState.idle) {
-          Navigator.of(context).pop();
-        }
+      if (!mounted) return;
+      setState(() => _state = state);
+      if (state == CallState.connected && !_stopwatch.isRunning) {
+        _stopwatch.start();
+        _startTimer();
+      }
+      if (state == CallState.idle) {
+        Navigator.of(context).pop();
       }
     });
 
     _callService.remoteStream.listen((stream) {
       _remoteRenderer.srcObject = stream;
     });
+
+    // Initialise renderers before starting the call to prevent
+    // "renderer not initialised" crashes (B3 fix).
+    _initAndStart();
   }
 
-  Future<void> _initRenderers() async {
+  Future<void> _initAndStart() async {
     await _localRenderer.initialize();
     await _remoteRenderer.initialize();
+    if (widget.incomingCall != null) {
+      await _answerIncomingCall();
+    } else {
+      await _startCall();
+    }
   }
 
   Future<void> _startCall() async {
-    final localStream = await _callService.startCall(
-      videoCall: widget.videoCall,
-    );
+    final localStream =
+        await _callService.startCall(videoCall: widget.videoCall);
     _localRenderer.srcObject = localStream;
   }
 
@@ -88,9 +91,7 @@ class _CallScreenState extends State<CallScreen> {
     Future.doWhile(() async {
       await Future.delayed(const Duration(seconds: 1));
       if (!mounted || _state != CallState.connected) return false;
-      setState(() {
-        _callDuration = _stopwatch.elapsed;
-      });
+      setState(() => _callDuration = _stopwatch.elapsed);
       return true;
     });
   }
@@ -122,13 +123,18 @@ class _CallScreenState extends State<CallScreen> {
         ),
         child: Stack(
           children: [
-            // Background orbs
-            Positioned(top: -120, left: -60,
-              child: _buildOrb(const Color(0x40B57BFF), 350)),
-            Positioned(bottom: -80, right: -60,
-              child: _buildOrb(const Color(0x3063B3FF), 300)),
+            Positioned(
+              top: -120,
+              left: -60,
+              child: _buildOrb(const Color(0x40B57BFF), 350),
+            ),
+            Positioned(
+              bottom: -80,
+              right: -60,
+              child: _buildOrb(const Color(0x3063B3FF), 300),
+            ),
 
-            // Remote video (full screen) or placeholder
+            // Remote video (full screen) or audio placeholder
             if (widget.videoCall)
               Positioned.fill(
                 child: RTCVideoView(
@@ -152,7 +158,8 @@ class _CallScreenState extends State<CallScreen> {
                     child: RTCVideoView(
                       _localRenderer,
                       mirror: true,
-                      objectFit: RTCVideoViewObjectFit.RTCVideoViewObjectFitCover,
+                      objectFit:
+                          RTCVideoViewObjectFit.RTCVideoViewObjectFitCover,
                     ),
                   ),
                 ),
@@ -178,62 +185,53 @@ class _CallScreenState extends State<CallScreen> {
 
   Widget _buildAudioCallBg() {
     return Center(
-      child: Column(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          Container(
-            width: 110,
-            height: 110,
-            decoration: BoxDecoration(
-              shape: BoxShape.circle,
-              gradient: const LinearGradient(
-                colors: [Color(0xFFB57BFF), Color(0xFF7BB8FF)],
-              ),
-              boxShadow: [
-                BoxShadow(
-                  color: const Color(0xFFB57BFF).withOpacity(0.4),
-                  blurRadius: 40,
-                  spreadRadius: 10,
-                ),
-              ],
-            ),
-            alignment: Alignment.center,
-            child: Text(
-              '♡',
-              style: GoogleFonts.playfairDisplay(
-                fontSize: 44,
-                color: const Color(0xFF1A0040),
-              ),
-            ),
+      child: Container(
+        width: 110,
+        height: 110,
+        decoration: BoxDecoration(
+          shape: BoxShape.circle,
+          gradient: const LinearGradient(
+            colors: [Color(0xFFB57BFF), Color(0xFF7BB8FF)],
           ),
-        ],
+          boxShadow: [
+            BoxShadow(
+              color: const Color(0xFFB57BFF).withValues(alpha: 0.4),
+              blurRadius: 40,
+              spreadRadius: 10,
+            ),
+          ],
+        ),
+        alignment: Alignment.center,
+        child: Text(
+          '♡',
+          style: GoogleFonts.playfairDisplay(
+            fontSize: 44,
+            color: const Color(0xFF1A0040),
+          ),
+        ),
       ),
     );
   }
 
   Widget _buildCallInfo() {
+    final label = switch (_state) {
+      CallState.calling => 'calling...',
+      CallState.ringing => 'ringing...',
+      CallState.connecting => 'connecting...',
+      CallState.connected => _formatDuration(_callDuration),
+      CallState.idle => 'ended',
+    };
+
     return GlassContainer(
       borderRadius: BorderRadius.circular(20),
       padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 14),
-      child: Column(
-        children: [
-          Text(
-            _state == CallState.calling
-                ? 'calling...'
-                : _state == CallState.ringing
-                    ? 'ringing...'
-                    : _state == CallState.connecting
-                        ? 'connecting...'
-                : _state == CallState.connected
-                    ? _formatDuration(_callDuration)
-                    : 'waiting...',
-            style: GoogleFonts.dmSans(
-              fontSize: 13,
-              color: Colors.white54,
-              letterSpacing: 1.5,
-            ),
-          ),
-        ],
+      child: Text(
+        label,
+        style: GoogleFonts.dmSans(
+          fontSize: 13,
+          color: Colors.white54,
+          letterSpacing: 1.5,
+        ),
       ),
     );
   }
@@ -265,7 +263,6 @@ class _CallScreenState extends State<CallScreen> {
             ),
           ],
           const SizedBox(width: 16),
-          // Hang up
           GestureDetector(
             onTap: () async {
               await _callService.hangUp();
@@ -279,7 +276,7 @@ class _CallScreenState extends State<CallScreen> {
                 color: const Color(0xFFFF4A6A),
                 boxShadow: [
                   BoxShadow(
-                    color: const Color(0xFFFF4A6A).withOpacity(0.4),
+                    color: const Color(0xFFFF4A6A).withValues(alpha: 0.4),
                     blurRadius: 20,
                     spreadRadius: 2,
                   ),
@@ -295,7 +292,8 @@ class _CallScreenState extends State<CallScreen> {
 
   Widget _buildOrb(Color color, double size) {
     return Container(
-      width: size, height: size,
+      width: size,
+      height: size,
       decoration: BoxDecoration(shape: BoxShape.circle, color: color),
     );
   }
@@ -322,9 +320,9 @@ class _ControlBtn extends StatelessWidget {
         decoration: BoxDecoration(
           shape: BoxShape.circle,
           color: active
-              ? Colors.white.withOpacity(0.25)
-              : Colors.white.withOpacity(0.1),
-          border: Border.all(color: Colors.white.withOpacity(0.2)),
+              ? Colors.white.withValues(alpha: 0.25)
+              : Colors.white.withValues(alpha: 0.1),
+          border: Border.all(color: Colors.white.withValues(alpha: 0.2)),
         ),
         child: Icon(icon, color: Colors.white, size: 22),
       ),

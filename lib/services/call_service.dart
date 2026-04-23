@@ -1,7 +1,12 @@
 import 'dart:async';
+
 import 'package:flutter_webrtc/flutter_webrtc.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
-import '../main.dart';
+
+import '../core/supabase_client.dart';
+import '../models/call.dart';
+
+export '../models/call.dart'; // re-export for call_screen convenience
 
 class CallService {
   RTCPeerConnection? _peerConnection;
@@ -21,11 +26,11 @@ class CallService {
 
   String get _myId => supabase.auth.currentUser!.id;
 
-  // ICE servers - Cloudflare STUN works in China, TURN is mandatory for reliability
+  // ICE servers — Cloudflare STUN + metered TURN (free tier).
   static const _iceServers = {
     'iceServers': [
       {'urls': 'stun:stun.cloudflare.com:3478'},
-      {'urls': 'stun:stun1.l.google.com:19302'}, // fallback for India side
+      {'urls': 'stun:stun1.l.google.com:19302'},
       {
         'urls': 'turn:openrelay.metered.ca:80',
         'username': 'openrelayproject',
@@ -107,7 +112,7 @@ class CallService {
   }
 
   Future<MediaStream> _getUserMedia({required bool videoCall}) async {
-    return await navigator.mediaDevices.getUserMedia({
+    return navigator.mediaDevices.getUserMedia({
       'audio': true,
       'video': videoCall
           ? {'facingMode': 'user', 'width': 640, 'height': 480}
@@ -118,12 +123,10 @@ class CallService {
   Future<void> _createPeerConnection() async {
     _peerConnection = await createPeerConnection(_iceServers);
 
-    // Add local tracks
     _localStream!.getTracks().forEach((track) {
       _peerConnection!.addTrack(track, _localStream!);
     });
 
-    // Handle remote stream
     _peerConnection!.onTrack = (event) {
       if (event.streams.isNotEmpty) {
         _remoteStream = event.streams.first;
@@ -132,7 +135,6 @@ class CallService {
       }
     };
 
-    // Send ICE candidates via Supabase
     _peerConnection!.onIceCandidate = (candidate) async {
       if (candidate.candidate != null) {
         await _sendSignal('candidate', {
@@ -151,16 +153,16 @@ class CallService {
     };
   }
 
-  void listenForIncomingCalls(void Function(IncomingCallOffer offer) onIncomingCall) {
+  void listenForIncomingCalls(
+    void Function(IncomingCallOffer offer) onIncomingCall,
+  ) {
     _incomingOfferHandler = onIncomingCall;
     _callStateController.add(CallState.idle);
     _listenForSignals();
   }
 
   Future<void> _listenForSignals() async {
-    if (_signalingChannel != null) {
-      return;
-    }
+    if (_signalingChannel != null) return;
 
     _signalingChannel = supabase
         .channel('signals-$_myId')
@@ -184,16 +186,15 @@ class CallService {
 
             switch (type) {
               case 'offer':
-                if (fromUser == null) {
-                  break;
-                }
+                if (fromUser == null) break;
                 _activePeerId = fromUser;
                 _callStateController.add(CallState.ringing);
                 _incomingOfferHandler?.call(
                   IncomingCallOffer(
                     signalId: signalId ?? '',
                     callerId: fromUser,
-                    callerName: signalData['callerName'] as String? ?? 'Partner',
+                    callerName:
+                        signalData['callerName'] as String? ?? 'Partner',
                     videoCall: signalData['videoCall'] as bool? ?? false,
                     offerData: signalData,
                   ),
@@ -236,7 +237,6 @@ class CallService {
 
   Future<void> _sendSignal(String type, Map<String, dynamic> data) async {
     final peerId = _activePeerId ?? await _findPartnerId();
-
     await supabase.from('signals').insert({
       'from_user': _myId,
       'to_user': peerId,
@@ -245,8 +245,14 @@ class CallService {
     });
   }
 
+  /// Returns the partner's user ID.
+  /// Throws a [StateError] if the app_pair row is missing.
   Future<String> _findPartnerId() async {
-    final pair = await supabase.from('app_pair').select('user_a, user_b').single();
+    final pair =
+        await supabase.from('app_pair').select('user_a, user_b').maybeSingle();
+    if (pair == null) {
+      throw StateError('app_pair row not found — pairing not set up.');
+    }
     final a = pair['user_a'] as String;
     final b = pair['user_b'] as String;
     return a == _myId ? b : a;
@@ -262,10 +268,7 @@ class CallService {
   }
 
   Future<void> _flushPendingCandidates() async {
-    if (_peerConnection == null || !_hasRemoteDescription) {
-      return;
-    }
-
+    if (_peerConnection == null || !_hasRemoteDescription) return;
     for (final candidate in List<RTCIceCandidate>.from(_pendingCandidates)) {
       await _peerConnection?.addCandidate(candidate);
     }
@@ -286,17 +289,13 @@ class CallService {
     _signalingChannel = null;
   }
 
-  // ── Public controls for mute/camera ──
+  // ── Public controls ──
   void toggleMute(bool muted) {
-    _localStream?.getAudioTracks().forEach((t) {
-      t.enabled = !muted;
-    });
+    _localStream?.getAudioTracks().forEach((t) => t.enabled = !muted);
   }
 
   void toggleCamera(bool cameraOff) {
-    _localStream?.getVideoTracks().forEach((t) {
-      t.enabled = !cameraOff;
-    });
+    _localStream?.getVideoTracks().forEach((t) => t.enabled = !cameraOff);
   }
 
   void dispose() {
@@ -305,21 +304,3 @@ class CallService {
     _callStateController.close();
   }
 }
-
-class IncomingCallOffer {
-  final String signalId;
-  final String callerId;
-  final String callerName;
-  final bool videoCall;
-  final Map<String, dynamic> offerData;
-
-  const IncomingCallOffer({
-    required this.signalId,
-    required this.callerId,
-    required this.callerName,
-    required this.videoCall,
-    required this.offerData,
-  });
-}
-
-enum CallState { idle, calling, ringing, connecting, connected }

@@ -1,9 +1,12 @@
 import 'dart:typed_data';
 import 'dart:async';
+
 import 'package:supabase_flutter/supabase_flutter.dart';
 import 'package:uuid/uuid.dart';
-import '../main.dart';
+
+import '../core/supabase_client.dart';
 import '../models/message.dart';
+import '../models/profile.dart';
 
 class ChatService {
   static const _uuid = Uuid();
@@ -14,16 +17,27 @@ class ChatService {
 
   String get currentUserId => supabase.auth.currentUser!.id;
 
-  // ── Fetch all messages (latest 100) ──
-  Future<List<Message>> fetchMessages() async {
+  // ── Fetch messages (with pagination) ──
+  Future<List<Message>> fetchMessages({int offset = 0, int limit = 100}) async {
     final data = await supabase
         .from('messages')
         .select('*, reactions:message_reactions(*)')
-        .order('created_at', ascending: true)
-        .limit(100);
+        .order('created_at', ascending: false)
+        .range(offset, offset + limit - 1);
     return _sortAndDeduplicate(
       (data as List).map((e) => Message.fromJson(e)).toList(),
     );
+  }
+
+  // ── Fetch a single message by ID (used for targeted reaction refresh) ──
+  Future<Message?> fetchMessageById(String messageId) async {
+    final data = await supabase
+        .from('messages')
+        .select('*, reactions:message_reactions(*)')
+        .eq('id', messageId)
+        .maybeSingle();
+    if (data == null) return null;
+    return Message.fromJson(data);
   }
 
   // ── Fetch the other user's profile ──
@@ -40,7 +54,8 @@ class ChatService {
   }
 
   Future<String?> _getPartnerId() async {
-    final row = await supabase.from('app_pair').select('user_a, user_b').maybeSingle();
+    final row =
+        await supabase.from('app_pair').select('user_a, user_b').maybeSingle();
     if (row == null) return null;
     final a = row['user_a'] as String?;
     final b = row['user_b'] as String?;
@@ -52,38 +67,50 @@ class ChatService {
 
   // ── Send a text message ──
   Future<Message> sendMessage(String content, {String? replyToId}) async {
-    final data = await supabase.from('messages').insert({
-      'id': _uuid.v4(),
-      'sender_id': currentUserId,
-      'content': content.trim(),
-      'reply_to_id': replyToId,
-    }).select('*, reactions:message_reactions(*)').single();
+    final data = await supabase
+        .from('messages')
+        .insert({
+          'id': _uuid.v4(),
+          'sender_id': currentUserId,
+          'content': content.trim(),
+          'reply_to_id': replyToId,
+        })
+        .select('*, reactions:message_reactions(*)')
+        .single();
     final message = Message.fromJson(data);
     unawaited(_notifyPartner(message));
     return message;
   }
 
   // ── Upload media and send message ──
-  Future<Message> sendMedia(Uint8List bytes, String mediaType, {String? replyToId}) async {
+  Future<Message> sendMedia(
+    Uint8List bytes,
+    String mediaType, {
+    String? replyToId,
+  }) async {
     final ext = mediaType == 'image' ? 'webp' : 'ogg';
     final fileName = '${_uuid.v4()}.$ext';
     final path = '$currentUserId/$fileName';
 
     await supabase.storage.from('media').uploadBinary(
-      path,
-      bytes,
-      fileOptions: FileOptions(
-        contentType: mediaType == 'image' ? 'image/webp' : 'audio/ogg',
-      ),
-    );
+          path,
+          bytes,
+          fileOptions: FileOptions(
+            contentType: mediaType == 'image' ? 'image/webp' : 'audio/ogg',
+          ),
+        );
 
-    final data = await supabase.from('messages').insert({
-      'id': _uuid.v4(),
-      'sender_id': currentUserId,
-      'media_path': path,
-      'media_type': mediaType,
-      'reply_to_id': replyToId,
-    }).select('*, reactions:message_reactions(*)').single();
+    final data = await supabase
+        .from('messages')
+        .insert({
+          'id': _uuid.v4(),
+          'sender_id': currentUserId,
+          'media_path': path,
+          'media_type': mediaType,
+          'reply_to_id': replyToId,
+        })
+        .select('*, reactions:message_reactions(*)')
+        .single();
     final message = Message.fromJson(data);
     unawaited(_notifyPartner(message));
     return message;
@@ -100,13 +127,17 @@ class ChatService {
 
   // ── Send a sticker message ──
   Future<Message> sendSticker(String url, {String? replyToId}) async {
-    final data = await supabase.from('messages').insert({
-      'id': _uuid.v4(),
-      'sender_id': currentUserId,
-      'media_url': url,
-      'media_type': 'sticker',
-      'reply_to_id': replyToId,
-    }).select('*, reactions:message_reactions(*)').single();
+    final data = await supabase
+        .from('messages')
+        .insert({
+          'id': _uuid.v4(),
+          'sender_id': currentUserId,
+          'media_url': url,
+          'media_type': 'sticker',
+          'reply_to_id': replyToId,
+        })
+        .select('*, reactions:message_reactions(*)')
+        .single();
     final message = Message.fromJson(data);
     unawaited(_notifyPartner(message));
     return message;
@@ -115,17 +146,15 @@ class ChatService {
   // ── Presence & Typing Status ──
   void initPresence(void Function(Map<String, dynamic>) onPresenceChange) {
     _presenceChannel = supabase.channel('presence:chat');
-    
+
     _presenceChannel!.onPresenceSync((_) {
       final state = _presenceChannel!.presenceState();
-      // Find partner's presence
       final partnerState = state.cast<SinglePresenceState?>().firstWhere(
-        (s) => s != null && s.key != currentUserId,
-        orElse: () => null,
-      );
+            (s) => s != null && s.key != currentUserId,
+            orElse: () => null,
+          );
       if (partnerState != null && partnerState.presences.isNotEmpty) {
-        final partnerPresence = partnerState.presences.first;
-        onPresenceChange(partnerPresence.payload);
+        onPresenceChange(partnerState.presences.first.payload);
       } else {
         onPresenceChange({'status': 'offline'});
       }
@@ -140,8 +169,6 @@ class ChatService {
       'status': status,
       'last_seen': DateTime.now().toIso8601String(),
     });
-    
-    // Also update periodic last_seen in database
     await updateLastSeen();
   }
 
@@ -163,18 +190,6 @@ class ChatService {
     );
   }
 
-  Future<Message?> fetchMessageById(String messageId) async {
-    final data = await supabase
-        .from('messages')
-        .select('*, reactions:message_reactions(*)')
-        .eq('id', messageId)
-        .maybeSingle();
-    if (data == null) {
-      return null;
-    }
-    return Message.fromJson(data);
-  }
-
   // ── Subscribe to realtime messages & reactions ──
   void subscribe(void Function(dynamic) onEvent) {
     _msgChannel?.unsubscribe();
@@ -187,13 +202,9 @@ class ChatService {
           callback: (payload) async {
             if (payload.eventType == PostgresChangeEvent.insert) {
               final messageId = payload.newRecord['id'] as String?;
-              if (messageId == null) {
-                return;
-              }
+              if (messageId == null) return;
               final message = await fetchMessageById(messageId);
-              if (message != null) {
-                onEvent(message);
-              }
+              if (message != null) onEvent(message);
             }
           },
         )
@@ -202,7 +213,12 @@ class ChatService {
           schema: 'public',
           table: 'message_reactions',
           callback: (payload) {
-            onEvent(payload);
+            // Pass the affected message_id so the UI only re-fetches that one.
+            final messageId = (payload.newRecord['message_id'] ??
+                payload.oldRecord['message_id']) as String?;
+            if (messageId != null) {
+              onEvent({'type': 'reaction', 'message_id': messageId});
+            }
           },
         )
         .onBroadcast(
@@ -214,17 +230,17 @@ class ChatService {
           },
         )
         .subscribe((status, [_]) {
-          if (status == RealtimeSubscribeStatus.subscribed) {
-            _reconnectAttempt = 0;
-            _reconnectTimer?.cancel();
-            return;
-          }
-          if (status == RealtimeSubscribeStatus.channelError ||
-              status == RealtimeSubscribeStatus.closed ||
-              status == RealtimeSubscribeStatus.timedOut) {
-            _scheduleReconnect(onEvent);
-          }
-        });
+      if (status == RealtimeSubscribeStatus.subscribed) {
+        _reconnectAttempt = 0;
+        _reconnectTimer?.cancel();
+        return;
+      }
+      if (status == RealtimeSubscribeStatus.channelError ||
+          status == RealtimeSubscribeStatus.closed ||
+          status == RealtimeSubscribeStatus.timedOut) {
+        _scheduleReconnect(onEvent);
+      }
+    });
   }
 
   List<Message> mergeMessages(List<Message> current, List<Message> incoming) {
@@ -241,19 +257,16 @@ class ChatService {
         byId[message.id] = message;
       }
     }
-
-    final sorted = byId.values.toList()
+    return byId.values.toList()
       ..sort((a, b) => a.createdAt.compareTo(b.createdAt));
-    return sorted;
   }
 
   void _scheduleReconnect(void Function(dynamic) onEvent) {
     _reconnectTimer?.cancel();
-    _reconnectAttempt += 1;
-    final seconds = _reconnectAttempt > 5 ? 5 : _reconnectAttempt;
-    _reconnectTimer = Timer(Duration(seconds: seconds), () {
-      subscribe(onEvent);
-    });
+    _reconnectAttempt = (_reconnectAttempt + 1).clamp(0, 6);
+    // Exponential back-off: 1, 2, 4, 8, 16, 32 seconds (capped at 32).
+    final delay = Duration(seconds: 1 << (_reconnectAttempt - 1));
+    _reconnectTimer = Timer(delay, () => subscribe(onEvent));
   }
 
   Future<void> _notifyPartner(Message message) async {
@@ -267,15 +280,13 @@ class ChatService {
         },
       );
     } catch (_) {
-      // Push is best-effort. Messaging should not fail if notification delivery does.
+      // Push is best-effort — messaging must not fail if notification does.
     }
   }
 
   String _buildNotificationPreview(Message message) {
     final text = message.content?.trim();
-    if (text != null && text.isNotEmpty) {
-      return text;
-    }
+    if (text != null && text.isNotEmpty) return text;
     switch (message.mediaType) {
       case 'image':
         return 'Sent a photo';
@@ -309,8 +320,8 @@ class ChatService {
   Future<void> updateLastSeen() async {
     await supabase
         .from('profiles')
-        .update({'last_seen': DateTime.now().toIso8601String()})
-        .eq('id', currentUserId);
+        .update({'last_seen': DateTime.now().toIso8601String()}).eq(
+            'id', currentUserId);
   }
 
   void dispose() {

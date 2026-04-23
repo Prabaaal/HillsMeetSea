@@ -3,7 +3,11 @@ import 'dart:js_interop';
 
 import 'package:flutter/foundation.dart';
 
-import '../main.dart';
+import '../core/supabase_client.dart';
+
+// VAPID key injected at build time via --dart-define=PUSH_VAPID_PUBLIC_KEY=...
+const String pushVapidPublicKey =
+    String.fromEnvironment('PUSH_VAPID_PUBLIC_KEY', defaultValue: '');
 
 @JS('window.HMSPush.isSupported')
 external bool _isPushSupported();
@@ -41,12 +45,18 @@ class NotificationService {
 
   Future<PushPermissionStatus> getStatus() async {
     if (!kIsWeb) {
-      return const PushPermissionStatus(supported: false, permission: 'unsupported');
+      return const PushPermissionStatus(
+        supported: false,
+        permission: 'unsupported',
+      );
     }
 
     final supported = _isPushSupported();
     if (!supported) {
-      return const PushPermissionStatus(supported: false, permission: 'unsupported');
+      return const PushPermissionStatus(
+        supported: false,
+        permission: 'unsupported',
+      );
     }
 
     return PushPermissionStatus(
@@ -56,15 +66,12 @@ class NotificationService {
   }
 
   Future<bool> requestPermissionAndSync() async {
-    if (!kIsWeb || !isConfigured) {
-      return false;
-    }
+    if (!kIsWeb || !isConfigured) return false;
 
-    final permission = await _requestPermission().toDart;
-    final granted = permission != null && (permission as JSString).toDart == 'granted';
-    if (!granted) {
-      return false;
-    }
+    final result = await _requestPermission().toDart;
+    // Guard against unexpected non-String JS return values.
+    final granted = result is JSString && result.toDart == 'granted';
+    if (!granted) return false;
 
     return syncPushSubscription();
   }
@@ -75,44 +82,35 @@ class NotificationService {
     }
 
     final raw = await _ensureSubscription(pushVapidPublicKey.toJS).toDart;
-    if (raw == null) {
-      return false;
-    }
+    if (raw == null || raw is! JSString) return false;
 
-    final payload = jsonDecode((raw as JSString).toDart);
-    if (payload is! Map<String, dynamic>) {
-      return false;
-    }
+    final payload = jsonDecode(raw.toDart);
+    if (payload is! Map<String, dynamic>) return false;
 
     final endpoint = payload['endpoint'];
-    if (endpoint is! String || endpoint.isEmpty) {
-      return false;
-    }
+    if (endpoint is! String || endpoint.isEmpty) return false;
 
-    await supabase.from('push_subscriptions').upsert({
-      'user_id': supabase.auth.currentUser!.id,
-      'endpoint': endpoint,
-      'subscription': payload,
-      'updated_at': DateTime.now().toIso8601String(),
-    }, onConflict: 'endpoint');
+    await supabase.from('push_subscriptions').upsert(
+      {
+        'user_id': supabase.auth.currentUser!.id,
+        'endpoint': endpoint,
+        'subscription': payload,
+        'updated_at': DateTime.now().toIso8601String(),
+      },
+      onConflict: 'endpoint',
+    );
 
     return true;
   }
 
   Future<void> unregisterCurrentDevice() async {
-    if (!kIsWeb || supabase.auth.currentUser == null) {
-      return;
-    }
+    if (!kIsWeb || supabase.auth.currentUser == null) return;
 
-    final endpoint = await _unsubscribePush().toDart;
-    if (endpoint == null) {
-      return;
-    }
+    final result = await _unsubscribePush().toDart;
+    if (result == null || result is! JSString) return;
 
-    final endpointValue = (endpoint as JSString).toDart;
-    if (endpointValue.isEmpty) {
-      return;
-    }
+    final endpointValue = result.toDart;
+    if (endpointValue.isEmpty) return;
 
     await supabase
         .from('push_subscriptions')

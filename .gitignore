@@ -120,8 +120,13 @@ app.*.symbols
 # Vercel
 .vercel
 
-# Environment
+# Environment / secrets — never commit real credentials
 .env
 
-# Local env config
-lib/env.dart
+# Compiled env config (uses --dart-define; see lib/config/env.example.dart)
+lib/config/env.dart
+
+# Binary assets that should not be in version control
+*.mp3
+
+implementation_plan.md

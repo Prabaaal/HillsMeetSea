@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:cached_network_image/cached_network_image.dart';
 import 'package:google_fonts/google_fonts.dart';
+
 import '../services/sticker_service.dart';
 
 class StickerPicker extends StatefulWidget {
@@ -13,13 +14,33 @@ class StickerPicker extends StatefulWidget {
 }
 
 class _StickerPickerState extends State<StickerPicker> {
-  final _stickerService = StickerService();
+  static const _stickerService = StickerService();
 
-  // Default sticker emojis rendered as text (no external URLs needed)
   static const _defaultEmojis = [
-    '❤️', '😂', '🥺', '😍', '🤗', '😘', '🫶', '💕',
-    '🌟', '🔥', '✨', '🎉', '💐', '🌈', '🦋', '🐻',
-    '🍕', '☕', '🎵', '💤', '🙈', '🤣', '😊', '💪',
+    '❤️',
+    '😂',
+    '🥺',
+    '😍',
+    '🤗',
+    '😘',
+    '🫶',
+    '💕',
+    '🌟',
+    '🔥',
+    '✨',
+    '🎉',
+    '💐',
+    '🌈',
+    '🦋',
+    '🐻',
+    '🍕',
+    '☕',
+    '🎵',
+    '💤',
+    '🙈',
+    '🤣',
+    '😊',
+    '💪',
   ];
 
   @override
@@ -39,10 +60,7 @@ class _StickerPickerState extends State<StickerPicker> {
             ),
           ),
           TabBar(
-            tabs: const [
-              Tab(text: 'Stickers'),
-              Tab(text: 'Saved'),
-            ],
+            tabs: const [Tab(text: 'Stickers'), Tab(text: 'Saved')],
             indicatorColor: const Color(0xFFB57BFF),
             labelColor: Colors.white,
             labelStyle: GoogleFonts.dmSans(fontWeight: FontWeight.w600),
@@ -51,10 +69,7 @@ class _StickerPickerState extends State<StickerPicker> {
           ),
           Expanded(
             child: TabBarView(
-              children: [
-                _buildEmojiGrid(),
-                _buildSavedStickers(),
-              ],
+              children: [_buildEmojiGrid(), _buildSavedStickers()],
             ),
           ),
         ],
@@ -62,7 +77,6 @@ class _StickerPickerState extends State<StickerPicker> {
     );
   }
 
-  // Default tab: large emoji stickers (no network dependency)
   Widget _buildEmojiGrid() {
     return GridView.builder(
       padding: const EdgeInsets.all(16),
@@ -74,13 +88,11 @@ class _StickerPickerState extends State<StickerPicker> {
       itemCount: _defaultEmojis.length,
       itemBuilder: (context, index) {
         return GestureDetector(
-          onTap: () {
-            // Send as a special sticker message (emoji rendered large in chat)
-            widget.onStickerSelected('emoji:${_defaultEmojis[index]}');
-          },
+          onTap: () =>
+              widget.onStickerSelected('emoji:${_defaultEmojis[index]}'),
           child: Container(
             decoration: BoxDecoration(
-              color: Colors.white.withOpacity(0.05),
+              color: Colors.white.withValues(alpha: 0.05),
               borderRadius: BorderRadius.circular(12),
             ),
             alignment: Alignment.center,
@@ -94,7 +106,6 @@ class _StickerPickerState extends State<StickerPicker> {
     );
   }
 
-  // Saved tab: stickers from the user's Supabase collection
   Widget _buildSavedStickers() {
     return StreamBuilder<List<String>>(
       stream: _stickerService.getMyStickers(),
@@ -114,17 +125,13 @@ class _StickerPickerState extends State<StickerPicker> {
                   const Icon(Icons.collections_outlined,
                       color: Colors.white24, size: 48),
                   const SizedBox(height: 16),
-                  Text(
-                    'No saved stickers yet',
-                    style: GoogleFonts.dmSans(
-                        color: Colors.white38, fontSize: 14),
-                  ),
+                  Text('No saved stickers yet',
+                      style: GoogleFonts.dmSans(
+                          color: Colors.white38, fontSize: 14)),
                   const SizedBox(height: 4),
-                  Text(
-                    'Long-press a sticker in chat to save it',
-                    style: GoogleFonts.dmSans(
-                        color: Colors.white24, fontSize: 12),
-                  ),
+                  Text('Long-press a sticker in chat to save it',
+                      style: GoogleFonts.dmSans(
+                          color: Colors.white24, fontSize: 12)),
                 ],
               ),
             ),
@@ -147,7 +154,7 @@ class _StickerPickerState extends State<StickerPicker> {
                 fit: BoxFit.contain,
                 placeholder: (_, __) => Container(
                   decoration: BoxDecoration(
-                    color: Colors.white.withOpacity(0.05),
+                    color: Colors.white.withValues(alpha: 0.05),
                     borderRadius: BorderRadius.circular(8),
                   ),
                 ),
